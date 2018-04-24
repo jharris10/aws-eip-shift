@@ -1,71 +1,53 @@
+from __future__ import print_function
 
-
+import json
 import boto3
-from collections import defaultdict
+
 import logging
 from botocore.exceptions import ClientError
 import argparse
 import re
-import sys
+import os
 
-session =''
-secfwintid = ''
-prifwintid = ''
+# Read Environment Variables for Tags
+# All TAGS should have a tag-name of 'tag_key_name'
+# The primary firewall should have a tag-value of 'pri_fw_tag_key_value'
+# The primary firewall should have a tag-value of 'sec_fw_tag_key_value'
+
+tag_key_name = os.environ['tag_key_name']
+prifw_tag_key_value = os.environ['prifw_tag_key_value']
+secfw_tag_key_value = os.environ['secfw_tag_key_value']
+int_index_number = os.environ['int_index_number']
 
 ec2 = boto3.resource('ec2')
-
-
-ec2 = boto3.resource('ec2')
-ec2_client = boto3.client('ec2')
-lambda_client = boto3.client('lambda')
-iam_client = boto3.client('iam')
+client = boto3.client('ec2')
 events_client = boto3.client('events')
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+print('Loading function')
+
+
+# get_vpn_priv
+# ec2.describe_interfaces does not always return the address in the order expected
+# We have to move through the array looking for the index number of the interface
+# DeviceIndex 0 == eth0, DeviceIndex 1 == eth1 ......
+
 def get_vpn_priv_int(instance):
     interface = instance.network_interfaces
     for int in (instance.network_interfaces):
-        print (int);
-        if ((int.attachment["DeviceIndex"])==1):
+        if ((int.attachment["DeviceIndex"]) == int_index_number):
             return int
 
-def get_secret():
-    secret_name = "transit-vpc-key"
-    endpoint_url = "https://secretsmanager.eu-west-1.amazonaws.com"
-    region_name = "eu-west-1"
 
-    session = boto3.session.Session()
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=region_name,
-        endpoint_url=endpoint_url
-    )
-
-    try:
-        get_secret_value_response = client.get_secret_value(
-            SecretId=secret_name
-        )
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            print("The requested secret " + secret_name + " was not found")
-        elif e.response['Error']['Code'] == 'InvalidRequestException':
-            print("The request was invalid due to:", e)
-        elif e.response['Error']['Code'] == 'InvalidParameterException':
-            print("The request had invalid params:", e)
-    else:
-        # Decrypted secret using the associated KMS CMK
-        # Depending on whether the secret was a string or binary, one of these fields will be populated
-        if 'SecretString' in get_secret_value_response:
-            secret = get_secret_value_response['SecretString']
-        else:
-            binary_secret_data = get_secret_value_response['SecretBinary']
-        return secret
-
-def config_gw_lambda_handler(event, context):
+def lambda_handler(event, context):
     global gcontext
 
     logger.info('[INFO] Got event{}'.format(event))
+    logger.info("tag_key_name: {}".format(tag_key_name))
+    logger.info("prifw_tag_key_value: {}".format(prifw_tag_key_value))
+    logger.info("secfw_tag_key_value: {}".format(secfw_tag_key_value))
+    logger.info("Interface that pubip will be associated with is eth{}".format(int_index_number))
 
     # create filter for instances in running state
     filters = [
@@ -75,50 +57,58 @@ def config_gw_lambda_handler(event, context):
         }
     ]
 
-    eiptagged = [{'Name':'tag-key', 'Values':['vpn']}]
+    eiptagged = [
+        {
+            'Name': 'tag-key',
+            'Values': [tag_key_name]
+
+        }
+    ]
 
     # filter the instances based on filters() above
     instances = ec2.instances.filter(Filters=eiptagged)
 
     VPNInstances = []
     secfw = {}
-    prifw ={}
+    prifw = {}
     for instance in instances:
-        # for each instance, append to array and print instance id
+        # for each instance, append to array
         VPNInstances.append(instance.id)
         for tag in instance.tags:
-            if tag["Value"] == 'secondaryfw':
+            if tag["Value"] == secfw_tag_key_value:
                 secfw["instance"] = instance
                 secfw["association"] = ec2.NetworkInterfaceAssociation(instance.id)
-            elif tag["Value"] == 'primaryfw':
+                logger.info("Found VPN secondaryfw instance.id via TAG value secondaryfw: {}".format(instance.id))
+            elif tag["Value"] == prifw_tag_key_value:
                 prifw["instance"] = instance
                 prifw["association"] = ec2.NetworkInterfaceAssociation(instance.id)
-        logger.info("instance.id".format(instance.id))
-
-
+                logger.info("Found VPN primaryfw instance.id via TAG value primaryfw: {}".format(instance.id))
         association = ec2.NetworkInterfaceAssociation('instance.id')
 
     client = boto3.client('ec2')
     addresses_dict = client.describe_addresses(Filters=eiptagged)
     pubip = addresses_dict["Addresses"][0]
     prifwstatus = prifw["instance"].state['Name']
+    logger.info("Primary firewall running status: {}".format(prifwstatus))
     secfwstatus = secfw["instance"].state['Name']
+    logger.info("Secondart firewall running status: {}".format(secfwstatus))
     secfwintid = get_vpn_priv_int(secfw["instance"])
     prifwintid = get_vpn_priv_int(prifw["instance"])
 
-    if  ((prifwstatus == 'running') and (secfwstatus == 'running')):
+    if ((prifwstatus == 'running') and (secfwstatus == 'running')):
         logger.info("Both firewalls running - exiting")
-        exit()
+
 
     elif ((prifwstatus != 'running') and (secfwstatus == 'running')):
-        logger.info ("Moving public IP with Association-ID: {}".format(pubip["AssociationId"]))
+        logger.info(
+            "Moving public IP with Association-ID {} from primary to secondary: ".format(pubip["AssociationId"]))
 
         if "AssociationId" in pubip:
             try:
-                release_result = client.disassociate_address(AssociationId = pubip["AssociationId"], DryRun=False)
+                release_result = client.disassociate_address(AssociationId=pubip["AssociationId"], DryRun=False)
 
             except Exception as e:
-                logger.info("Release [RESPONSE]: {}".format(e))
+                logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
 
         try:
             association_result = client.associate_address(
@@ -130,7 +120,7 @@ def config_gw_lambda_handler(event, context):
 
 
     elif ((prifwstatus == 'running') and (secfwstatus != 'running')):
-        logger.info ("Moving public IP with Association-ID: {}".format(pubip["AssociationId"]))
+        logger.info("Moving public IP with Association-ID {} from secondary to primary:".format(pubip["AssociationId"]))
 
         if "AssociationId" in pubip:
             try:
