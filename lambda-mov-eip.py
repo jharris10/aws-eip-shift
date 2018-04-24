@@ -97,38 +97,47 @@ def lambda_handler(event, context):
 
     if ((prifwstatus == 'running') and (secfwstatus == 'running')):
         logger.info("Both firewalls running - exiting")
-
+        exit()
 
     elif ((prifwstatus != 'running') and (secfwstatus == 'running')):
-        logger.info(
-            "Moving public IP with Association-ID {} from primary to secondary: ".format(pubip["AssociationId"]))
+        if 'NetworkInterfaceId' in pubip:
+            if ((pubip["NetworkInterfaceId"] == secfwintid.id)):
+                logger.info("Interface Already associated with firewall")
+                exit()
 
-        if "AssociationId" in pubip:
-            try:
-                release_result = client.disassociate_address(AssociationId=pubip["AssociationId"], DryRun=False)
-
-            except Exception as e:
-                logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
-
+            elif (pubip["NetworkInterfaceId"] != secfwintid.id):
+                #       if "AssociationId" in pubip:
+                logger.info("Moving public IP with Association-ID: {}".format(pubip["AssociationId"]))
+                try:
+                    release_result = client.disassociate_address(AssociationId=pubip["AssociationId"], DryRun=False)
+                except Exception as e:
+                    logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
+        # EIP not associated with this firewall so go ahead and associate it.
         try:
             association_result = client.associate_address(
                 NetworkInterfaceId=secfwintid.id,
                 AllocationId=pubip["AllocationId"],
                 AllowReassociation=False)
         except Exception as e:
-            logger.info("Association Fail [RESPONSE]: {}".format(e))
-
+            logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
 
     elif ((prifwstatus == 'running') and (secfwstatus != 'running')):
-        logger.info("Moving public IP with Association-ID {} from secondary to primary:".format(pubip["AssociationId"]))
 
-        if "AssociationId" in pubip:
-            try:
-                release_result = client.disassociate_address(AssociationId=pubip["AssociationId"], DryRun=False)
+        # Check that the EIP is currently associated with an interface
+        # If it is then go ahead and perform the normal checks
+        if 'NetworkInterfaceId' in pubip:
+            if ((pubip["NetworkInterfaceId"] == prifwintid.id)):
+                logger.info("Interface Already associated with firewall")
+                exit()
 
-            except Exception as e:
-                logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
-
+            elif (pubip["NetworkInterfaceId"] != prifwintid.id):
+                #       if "AssociationId" in pubip:
+                logger.info("Moving public IP with Association-ID: {}".format(pubip["AssociationId"]))
+                try:
+                    release_result = client.disassociate_address(AssociationId=pubip["AssociationId"], DryRun=False)
+                except Exception as e:
+                    logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
+        # EIP not associated with this firewall so go ahead and associate it.
         try:
             association_result = client.associate_address(
                 NetworkInterfaceId=prifwintid.id,
@@ -136,5 +145,3 @@ def lambda_handler(event, context):
                 AllowReassociation=False)
         except Exception as e:
             logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
-
-
