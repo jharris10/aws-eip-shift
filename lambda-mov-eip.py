@@ -1,13 +1,10 @@
-from __future__ import print_function
 
-import json
-import boto3
+
 
 import logging
-from botocore.exceptions import ClientError
-import argparse
-import re
 import os
+import boto3
+from botocore.exceptions import ClientError
 
 # Read Environment Variables for Tags
 # All TAGS should have a tag-name of 'tag_key_name'
@@ -18,6 +15,11 @@ tag_key_name = os.environ['tag_key_name']
 prifw_tag_key_value = os.environ['prifw_tag_key_value']
 secfw_tag_key_value = os.environ['secfw_tag_key_value']
 int_index_number = os.environ['int_index_number']
+
+
+event = {}
+context = {}
+
 
 ec2 = boto3.resource('ec2')
 client = boto3.client('ec2')
@@ -34,10 +36,10 @@ print('Loading function')
 # DeviceIndex 0 == eth0, DeviceIndex 1 == eth1 ......
 
 def get_vpn_priv_int(instance):
-    interface = instance.network_interfaces
-    for int in (instance.network_interfaces):
-        if ((int.attachment["DeviceIndex"]) == int_index_number):
-            return int
+
+    for interface in (instance.network_interfaces):
+        if ((interface.attachment["DeviceIndex"]) == int(int_index_number)):
+            return interface
 
 
 def lambda_handler(event, context):
@@ -69,11 +71,13 @@ def lambda_handler(event, context):
     instances = ec2.instances.filter(Filters=eiptagged)
 
     VPNInstances = []
+    logger.info("got these instances with the expected tags: {}".format(instances))
     secfw = {}
     prifw = {}
     for instance in instances:
         # for each instance, append to array
         VPNInstances.append(instance.id)
+        logger.info("processing instance: {}".format(instance))
         for tag in instance.tags:
             if tag["Value"] == secfw_tag_key_value:
                 secfw["instance"] = instance
@@ -83,10 +87,14 @@ def lambda_handler(event, context):
                 prifw["instance"] = instance
                 prifw["association"] = ec2.NetworkInterfaceAssociation(instance.id)
                 logger.info("Found VPN primaryfw instance.id via TAG value primaryfw: {}".format(instance.id))
-        association = ec2.NetworkInterfaceAssociation('instance.id')
+
+    logger.info('[INFO] Primary firewall is {}'.format(prifw))
+    logger.info('[INFO] Primary firewall is {}'.format(secfw))
+    association = ec2.NetworkInterfaceAssociation('instance.id')
 
     client = boto3.client('ec2')
     addresses_dict = client.describe_addresses(Filters=eiptagged)
+    logger.info('[INFO] Found these public ips from filter {}'.format(addresses_dict))
     pubip = addresses_dict["Addresses"][0]
     prifwstatus = prifw["instance"].state['Name']
     logger.info("Primary firewall running status: {}".format(prifwstatus))
@@ -145,3 +153,6 @@ def lambda_handler(event, context):
                 AllowReassociation=False)
         except Exception as e:
             logger.info("Disassociation Fail [RESPONSE]: {}".format(e))
+
+
+
